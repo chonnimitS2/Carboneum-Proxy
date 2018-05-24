@@ -35,7 +35,9 @@ let obj = {
         var options = {
             method: 'GET',
             url: 'https://api.binance.com/api/v1/depth',
-            qs: {symbol: req.query.symbol},
+            qs: {
+                symbol: req.query.symbol
+            },
             headers:
                 {
                     'Postman-Token': 'cabcef67-a56f-4f80-b2cf-bd0a9001d03d',
@@ -62,7 +64,7 @@ let obj = {
             newClientOrderId: req.body.newClientOrderId,
             stopPrice: req.body.stopPrice,
             icebergQty: req.body.icebergQty,
-            newOrderRespType: req.body.newOderRespType,
+            newOrderRespType: req.body.newOrderRespType,
             recvWindow: req.body.recvWindow,
             timestamp: req.body.timestamp,
             signature: ''
