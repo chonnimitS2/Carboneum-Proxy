@@ -8,7 +8,7 @@ function genSignature(form) {
     queryString = queryString.join('');
 
     console.log(queryString);
-    let signatureResult = CryptoJS.SHA256(queryString + "9a0aafbef48d" ).toString(CryptoJS.enc.Hex);
+    let signatureResult = CryptoJS.SHA256(queryString + "/*secretkey*/" ).toString(CryptoJS.enc.Hex);
     form.signature = signatureResult;
 }
 let obj = {
