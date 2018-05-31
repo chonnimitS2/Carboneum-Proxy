@@ -1,6 +1,9 @@
 var request = require("request");
 var CryptoJS = require("crypto-js");
 
+
+let nonce = Date.now();
+
 function genSignature(form) {
     let queryString = [];
     if (form !== undefined) {
@@ -17,9 +20,8 @@ function genSignature(form) {
     queryString = queryString.join('&');
 
     console.log(queryString);
-    let signatureResult = CryptoJS.HmacSHA256(queryString, "/*secretkey*/" ).toString(CryptoJS.enc.Hex);
+    let signatureResult = CryptoJS.HmacSHA256(queryString, "secretkey" ).toString(CryptoJS.enc.Hex);
     form.signature = signatureResult;
-    console.log(`echo -n "` + queryString + `" | openssl dgst -sha256 -hmac "` + "/*secretkey*/" + `"`);
 }
 
 function deleteField(form) {
@@ -30,6 +32,7 @@ function deleteField(form) {
         }
     }
 }
+
 let obj = {
     depth: function (req, res) {
         var options = {
@@ -47,9 +50,13 @@ let obj = {
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
-            console.log(body);
-            res.setHeader('Content-Type', 'application/json');
-            res.send(body);
+            obj = body;
+            obj = JSON.parse(body);
+            obj.lastUpdateId = nonce;
+
+            console.log(obj);
+            // res.setHeader('Content-Type', 'application/json');
+            res.send(obj);
         });
 
     },
@@ -78,10 +85,9 @@ let obj = {
             url: 'https://api.binance.com/api/v3/order',
             headers:
                 {
-                    'Postman-Token': 'b592c38d-d809-4660-80ad-9d10243ff3bb',
                     'Cache-Control': 'no-cache',
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': '/*APIkey*/'
+                    'X-MBX-APIKEY': 'apikey'
                 },
             form: form
         };
@@ -89,6 +95,7 @@ let obj = {
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
+            res.setHeader('Content-Type', 'application/json');
             console.log(body);
             res.send(body);
         });
@@ -96,7 +103,7 @@ let obj = {
     },
     allOrder: function (req, res) {
         let qs = {symbol: req.query.symbol,
-            timestamp: req.query.timestamp};
+            timestamp: req.query.timestamp + '000'};
 
         genSignature(qs);
         var options = {
@@ -105,7 +112,7 @@ let obj = {
             headers:
                 {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': '/*APIkey*/'
+                    'X-MBX-APIKEY': 'apikey'
                 },
             qs: qs
         };
@@ -119,9 +126,11 @@ let obj = {
 
     },
     deleteOrder: function (req,res) {
-        let qs = {symbol: req.query.symbol,
+        let qs = {
+            symbol: req.query.symbol,
             orderId: req.query.orderId,
-            timestamp: req.query.timestamp};
+            timestamp: req.query.timestamp
+        };
 
         genSignature(qs);
         var options = {
@@ -130,7 +139,7 @@ let obj = {
             headers:
                 {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': '/*APIkey*/'
+                    'X-MBX-APIKEY': 'apikey'
                 },
             qs: qs
         };
@@ -144,7 +153,9 @@ let obj = {
 
     },
     account: function (req,res) {
-        let qs = { timestamp: req.query.timestamp };
+        let qs = {
+            timestamp: req.query.timestamp
+        };
 
         genSignature(qs);
         var options = {
@@ -153,7 +164,7 @@ let obj = {
             headers:
                 {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': '/*APIkey*/'
+                    'X-MBX-APIKEY': 'apikey'
                 },
             qs: qs
         };

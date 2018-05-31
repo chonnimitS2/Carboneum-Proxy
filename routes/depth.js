@@ -9,6 +9,5 @@ module.exports = function (exchange) {
         exchange[req.query.exchange].depth(req, res);
     });
 
-
     return router;
 };
