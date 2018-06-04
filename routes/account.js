@@ -7,11 +7,19 @@ var bx = require('../model/bx');
 module.exports = function (exchange) {
     /* GET home page. */
     router.get('/', function(req, res, next) {
-        exchange[req.query.exchange].account(req, res);
+        if (exchange[req.query.exchange]) {
+            exchange[req.query.exchange].account(req, res, next);
+        } else {
+            return next(new ExchangeError('Exchange not found!', 9000));
+        }
     });
 
     router.post('/', function(req, res, next) {
-        exchange[req.query.exchange].account(req, res);
+        if (exchange[req.query.exchange]) {
+            exchange[req.query.exchange].account(req, res);
+        } else {
+            return next(new ExchangeError('Exchange not found!', 9000));
+        }
     });
 
     return router;

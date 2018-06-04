@@ -1,6 +1,9 @@
 var request = require("request");
 var CryptoJS = require("crypto-js");
 
+var symbol = require("./symbol");
+var ExchangeError = require("./exchangeerror");
+
 let nonce = Date.now();
 
 function genSignature(form) {
@@ -15,39 +18,42 @@ function genSignature(form) {
 }
 
 let obj = {
-    depth: function (req, res) {
+    depth: function (req, res, next) {
+
+        // try {
+        //     var symbolName = symbol.carboneum[req.query.symbol].bx;
+        // } catch (e) {
+        //     symbolName = req.query.symbol;
+        // }
         var options = {
             method: 'GET',
             url: 'https://bx.in.th/api/orderbook/',
             qs: {
-                pairing: req.query.symbol
+                pairing: symbol.carboneum[req.query.symbol].bx
             },
             headers:
                 {
                     'Cache-Control': 'no-cache'
-                }
+                },
+            json:true
         };
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
-            obj = body;
-            obj = JSON.parse(body);
-            obj.lastUpdateId = nonce;
+            body.lastUpdateId = nonce;
 
-            console.log(obj);
-            // res.setHeader('Content-Type', 'application/json');
-            res.send(obj);
-
+            console.log(body);
+            res.send(body);
         });
 
     },
 
-    newOrder: function (req, res) {
+    newOrder: function (req, res, next) {
         let form = {
             key: req.body.key,
             nonce: req.body.timestamp + '000',
             signature: '',
-            pairing: req.body.symbol,
+            pairing: symbol.carboneum[req.body.symbol].bx,
             type: req.body.side,
             amount: req.body.quantity,
             rate: req.body.price
@@ -62,16 +68,34 @@ let obj = {
                 {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
-            form: form
+            form: form,
+            json:true
         };
 
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
+
             console.log(body);
-            res.setHeader('Content-Type', 'application/json');
+            if (body.error !== null) {
+                if (body.error.substring(0, 32) === 'You must enter a valid price per') {
+                    return next(new ExchangeError('Invalid Price.', 9001));
+                } else if (body.error.substring(0, 22) === 'You must enter a valid') {
+                    return next(new ExchangeError('Invalid Quantity.', 9002));
+                } else if (body.error.substring(0, 33) === 'Amount entered in more than your ') {
+                    return next(new ExchangeError('Amount entered in more than your available balance.', 9003));
+                } else if (body.error.substring(0, 18) === 'Invalid trade type') {
+                    return next(new ExchangeError('Invalid side.', 1117));
+                } else if (body.error.substring(0, 13) === 'Invalid Nonce') {
+                    return next(new ExchangeError('Invalid Nonce.', 9004));
+                }  else {
+                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                }
+            }
+
             res.send({
                 "symbol": req.body.symbol,
+                "orderId": '',
                 "clientOrderId": '',
                 "transactTime": req.body.timestamp,
                 "price": req.body.price,
@@ -80,16 +104,16 @@ let obj = {
                 "status": '',
                 "timeInForce": '',
                 "type": '',
-                // "side": req.body.side.toUpperCase()
+                "side": req.body.side.toUpperCase()
             });
         });
 
     },
-    allOrder: function (req, res) {
+    allOrder: function (req, res, next) {
         let form = {
             key: req.body.key,
-            nonce: req.query.timestamp+ '000',
-            pairing: req.query.symbol
+            nonce: req.query.timestamp + '000',
+            pairing: symbol.carboneum[req.query.symbol].bx
         };
 
         let toBinance = [];
@@ -102,42 +126,51 @@ let obj = {
                 {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
-            form: form
+            form: form,
+            json:true
         };
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
-            let val = JSON.parse(body);
+            console.log(body);
+            if (body.success === false) {
+                if (body.error.substring(0, 28) === 'You did not set any API key.') {
+                    return next(new ExchangeError('Invalid Api-Key ID.', 2008));
+                } else if (body.error.substring(0, 13) === 'Invalid Nonce') {
+                    return next(new ExchangeError('Invalid Nonce.', 9004));
+                } else {
+                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                }
+            }
 
-            for (let i in val.orders) {
+            for (let i in body.orders) {
                 toBinance.push({
                     "symbol": req.query.symbol,
-                    "orderId": val.orders[i].order_id,
+                    "orderId": body.orders[i].order_id,
                     "clientOrderId": '',
-                    "price": val.orders[i].rate,
-                    "origQty": val.orders[i].amount,
+                    "price": body.orders[i].rate,
+                    "origQty": body.orders[i].amount,
                     "executedQty": '',
                     "status": '',
                     "timeInForce": '',
                     "type": '',
-                    "side": val.orders[i].order_type.toUpperCase(),
+                    "side": body.orders[i].order_type.toUpperCase(),
                     "stopPrice": '',
                     "icebergQty": '',
-                    "time": Date.parse(val.orders[i].date)/1000,
+                    "time": Date.parse(body.orders[i].date)/1000,
                     "isWorking": ''
                 });
             }
             console.log(toBinance);
-            res.setHeader('Content-Type', 'application/json');
             res.send(toBinance);
         });
 
     },
-    deleteOrder: function (req, res) {
+    deleteOrder: function (req, res, next) {
         let form = {
             key: req.body.key,
             nonce: req.query.timestamp + '000',
-            pairing: req.query.symbol,
+            pairing: symbol.carboneum[req.query.symbol].bx,
             order_id: req.query.orderId
         };
 
@@ -149,13 +182,23 @@ let obj = {
                 {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
-            form: form
+            form: form,
+            json:true
         };
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
             console.log(body);
-            res.setHeader('Content-Type', 'application/json');
+
+            if(body.error !== null) {
+                if (body.error.substring(0, 32) === 'Order not found') {
+                    return next(new ExchangeError('Unknown order sent.', 2011));
+                } else {
+                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                }
+            }
+
+            console.log(body);
             res.send({
                 "symbol": req.query.symbol,
                 "origClientOrderId": '',
@@ -165,7 +208,7 @@ let obj = {
         });
 
     },
-    account: function (req, res) {
+    account: function (req, res, next) {
         let form = {
             key: req.body.key,
             nonce: req.query.timestamp + '000'
@@ -192,25 +235,31 @@ let obj = {
                 {
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
-            form: form
+            form: form,
+            json:true
         };
         request(options, function (error, response, body) {
             if (error) throw new Error(error);
 
-            let value = JSON.parse(body);
+            if(body.error !== null) {
+                if (body.error.substring(0, 32) === 'Order not found') {
+                    return next(new ExchangeError('Mandatory parameter was not sent, was empty/null, or malformed.', 1102));
+                } else {
+                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                }
+            }
 
-            for (let i in value.balance) {
-                if (value.balance.hasOwnProperty(i)) {
+            for (let i in body.balance) {
+                if (body.balance.hasOwnProperty(i)) {
                     accBx.balances.push({
                         "asset": i,
-                        "free": value.balance[i].available,
-                        "locked": value.balance[i].orders
+                        "free": body.balance[i].available,
+                        "locked": body.balance[i].orders
                     });
                 }
             }
 
             console.log(accBx);
-            res.setHeader('Content-Type', 'application/json');
             res.send(accBx);
         });
 
