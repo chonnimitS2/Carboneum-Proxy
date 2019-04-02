@@ -1,20 +1,26 @@
-var express = require('express');
-var router = express.Router();
-var binance = require('../model/binance');
-var bx = require('../model/bx');
+const express = require('express');
+const router = express.Router();
+const exchange = require('../model/exchange');
+const ExchangeError = require("../model/exchangeError");
 
-var ExchangeError = require("../model/exchangeerror");
+router.get('/', async (req, res, next) => {
+      const symbol = await require('../model/symbol');
 
-module.exports = function (exchange) {
-    /* GET home page. */
+      if (exchange[req.query.exchange]) {
+          if (symbol['carboneum'].hasOwnProperty(req.query.symbol) && symbol['carboneum'][req.query.symbol].hasOwnProperty(req.query.exchange)) {
+              const exchangeName = symbol['carboneum'][req.query.symbol][req.query.exchange];
+              const depth = await exchange[req.query.exchange].depth(exchangeName, next);
 
-    router.get('/', function(req, res, next) {
-        if (exchange[req.query.exchange]) {
-            exchange[req.query.exchange].depth(req, res, next);
-        } else {
-            return next(new ExchangeError('Exchange not found!', 9000));
-        }
-    });
+              if (depth) {
+                  res.send(depth);
+              }
+          } else {
+              return next(new ExchangeError('Invalid symbol.', 1121));
+          }
+      } else {
+          return next(new ExchangeError('Exchange not found!', 9000));
+      }
+  }
+);
 
-    return router;
-};
+module.exports = router;

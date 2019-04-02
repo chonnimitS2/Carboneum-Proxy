@@ -1,18 +1,37 @@
-var request = require("request");
-var CryptoJS = require("crypto-js");
+const request = require("request-promise-native");
+const CryptoJS = require("crypto-js");
 
-var symbol = require("./symbol");
-var ExchangeError = require("./exchangeerror");
+const getval = require("./getval");
+const ExchangeError = require("./exchangeError");
 
 
-function genSignature(form, path, nonce) {
+async function getvalue(req) {
+    let secret_key = await getval.get(req.session.address + ":" + req.query.exchange + ":SECRET_KEY", req.session.sign);
+    if (secret_key === null) {
+        return {err: new ExchangeError('Required Secret_key.', 7000)};
+    }
+
+    let api_key = await getval.get(req.session.address + ":" + req.query.exchange + ":API_KEY", req.session.sign);
+    if (api_key === null) {
+        return {err: new ExchangeError('Required API_KEY.', 7001)};
+    }
+
+    // noinspection JSUnresolvedVariable
+    return {
+        api_key: api_key,
+        secret_key: secret_key
+    }
+}
+
+
+function genSignature(form, path, nonce, secret_key) {
     let queryString = [];
     if (form !== undefined) {
         for (let key in form) {
-            if (key !== 'timestamp' && key !== 'signature') {
-                queryString.push(key + '=' + form[key]);
-                console.log(key);
-                console.log(form[key]);
+            if (form.hasOwnProperty(key)) {
+                if (key !== 'timestamp' && key !== 'signature') {
+                    queryString.push(key + '=' + form[key]);
+                }
             }
         }
         queryString.sort();
@@ -23,31 +42,18 @@ function genSignature(form, path, nonce) {
     let strForSign = path + '/' + nonce + '/' + queryString;
     let signatureStr = new Buffer(strForSign).toString('base64');
 
-    console.log(strForSign);
-    console.log(signatureStr);
-
-    console.log(queryString);
-    return CryptoJS.HmacSHA256(signatureStr, process.env.KU_SECRET_KEY).toString(CryptoJS.enc.Hex);
+    return CryptoJS.HmacSHA256(signatureStr, secret_key).toString(CryptoJS.enc.Hex);
 }
 
 let obj = {
-    depth: function (req, res, next) {
-
-        let nonce = new Date().getTime();
-
-        try {
-            var symbolName = symbol.carboneum[req.query.symbol].kucoin;
-        } catch (e) {
-            symbolName = req.query.symbol;
-        }
-
+    depth: async (symbolName, next) => {
         let depthKc = {
-            "lastUpdateId": nonce,
+            "lastUpdateId": new Date().getTime(),
             "bids": [],
             "asks": []
         };
 
-        var options = {
+        let options = {
             method: 'GET',
             url: 'https://api.kucoin.com/v1/open/orders',
             qs: {
@@ -56,124 +62,160 @@ let obj = {
             json: true
         };
 
-        request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+        try {
+            const body = await request(options);
 
             if (body.success === false) {
-                if (body.msg.substring(0, 16) === 'SYMBOL NOT FOUND') {
-                    return next(new ExchangeError('Invalid symbol.', 1121));
+                if (body['msg'].substring(0, 16) === 'SYMBOL NOT FOUND') {
+                    next(new ExchangeError('Invalid symbol.', 1121));
                 } else {
-                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                    next(new ExchangeError('An unknown error occured while processing the request.', 1000));
                 }
+
+                return;
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.data.BUY) {
+                // noinspection JSUnresolvedVariable
                 if (body.data.BUY.hasOwnProperty(i)) {
-                    depthKc.bids.push([
-                        body.data.BUY[i][0],
-                        body.data.BUY[i][1]
-                    ]);
+                    // noinspection JSUnresolvedVariable
+                    body.data.BUY[i] = `${body.data.BUY[i]}`;
+                    // noinspection JSUnresolvedVariable
+                    if (body.data.BUY.hasOwnProperty(i)) {
+                        // noinspection JSUnresolvedVariable
+                        depthKc.bids.push([
+                            body.data.BUY[i][0],
+                            body.data.BUY[i][1]
+                        ]);
+                    }
                 }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.data.SELL) {
+                // noinspection JSUnresolvedVariable
                 if (body.data.SELL.hasOwnProperty(i)) {
-                    depthKc.asks.push([
-                        body.data.SELL[i][0],
-                        body.data.SELL[i][1]
-                    ]);
+                    // noinspection JSUnresolvedVariable
+                    body.data.SELL[i] = `${body.data.SELL[i]}`;
+                    // noinspection JSUnresolvedVariable
+                    if (body.data.SELL.hasOwnProperty(i)) {
+                        // noinspection JSUnresolvedVariable
+                        depthKc.asks.push([
+                            body.data.SELL[i][0],
+                            body.data.SELL[i][1]
+                        ]);
+                    }
                 }
             }
-            console.log(body);
-            res.send(depthKc);
-        });
 
+            return depthKc;
+        } catch (e) {
+            next(e);
+        }
     },
 
-    newOrder: function (req, res, next) {
+    newOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        let symbolName;
+        let nonce = new Date().getTime();
+
+        const key = await getvalue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
+        try {
+            symbolName = symbol.carboneum[req.body.symbol].kucoin;
+        } catch (e) {
+            symbolName = req.body.symbol;
+        }
+
         let form = {
             type: req.body.side.toUpperCase(),
             price: req.body.price,
-            amount: req.body.quantity
+            amount: req.body.quantity,
+            symbol: symbolName
         };
-
-        let nonce = new Date().getTime();
-
-        try {
-            var symbolName = symbol.carboneum[req.query.symbol].kucoin;
-        } catch (e) {
-            symbolName = req.query.symbol;
-        }
 
         const signature = genSignature({
             symbol: symbolName,
             type: req.body.side.toUpperCase(),
             price: req.body.price,
             amount: req.body.quantity
-        }, '/v1/order', nonce);
+        }, '/v1/order', nonce, key.secret_key);
 
-        var options = {
+        let options = {
             method: 'POST',
             url: 'https://api.kucoin.com/v1/order',
-            qs: {
-                symbol: symbolName
-            },
             headers:
-                {
-                    'Cache-Control': 'no-cache',
-                    'KC-API-SIGNATURE': signature,
-                    'KC-API-NONCE': nonce,
-                    'KC-API-KEY': process.env.KC_API_KEY
-                },
+              {
+                  'Cache-Control': 'no-cache',
+                  'KC-API-SIGNATURE': signature,
+                  'KC-API-NONCE': nonce,
+                  'KC-API-KEY': key.api_key
+              },
             form: form,
             json: true
         };
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
-
-            // body.symbol = symbol.kucoin[body.symbol];
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             if (body.success === false) {
                 if (body.msg.substring(0, 29) === 'Signature verification failed') {
                     return next(new ExchangeError('Invalid Signature.', 1022));
                 } else if (body.msg.substring(0, 17) === 'Invalid operation') {
                     return next(new ExchangeError('This operation is not supported.', 1020));
+                } else if (body.msg.substring(0, 17) === 'Insufficient balance') {
+                    return next(new ExchangeError('Check your balance.', 9510));
                 } else {
                     return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
                 }
             }
 
-            console.log(body);
             res.send({
-                "symbol": req.query.symbol,
+                "symbol": req.body.symbol,
                 "orderId": body.data.orderOid,
-                "clientOrderId": '',
+                "clientOrderId": null,
                 "transactTime": req.body.timestamp,
                 "price": req.body.price,
                 "origQty": req.body.quantity,
-                "executeQty": '',
-                "status": '',
-                "timeInForce": '',
-                "type": '',
+                "executedQty": null,
+                "status": null,
+                "timeInForce": null,
+                "type": null,
                 "side": req.body.side.toUpperCase()
             });
         });
 
     },
 
-    allOrder: function (req, res, next) {
+    allOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
 
+        let symbolName;
         let nonce = new Date().getTime();
 
+        const key = await getvalue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
         try {
-            var symbolName = symbol.carboneum[req.query.symbol].kucoin;
+            symbolName = symbol.carboneum[req.query.symbol].kucoin;
         } catch (e) {
             symbolName = req.query.symbol;
         }
 
         const signature = genSignature({
             symbol: symbolName
-        }, '/v1/order/active', nonce);
+        }, '/v1/order/active', nonce, key.secret_key);
 
         let toKucoin = [];
 
@@ -181,21 +223,24 @@ let obj = {
             symbol: symbolName
         };
 
-        var options = {
+        let options = {
             method: 'GET',
             url: 'https://api.kucoin.com/v1/order/active',
             headers:
-                {
-                    'Cache-Control': 'no-cache',
-                    'KC-API-SIGNATURE': signature,
-                    'KC-API-NONCE': nonce,
-                    'KC-API-KEY': process.env.KC_API_KEY
-                },
+              {
+                  'Cache-Control': 'no-cache',
+                  'KC-API-SIGNATURE': signature,
+                  'KC-API-NONCE': nonce,
+                  'KC-API-KEY': key.api_key
+              },
             qs: qs,
             json: true
         };
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             if (body.success === false) {
                 if (body.msg.substring(0, 29) === 'Signature verification failed') {
@@ -207,143 +252,213 @@ let obj = {
                 }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.data.SELL) {
-                toKucoin.push({
-                    "symbol": req.query.symbol,
-                    "orderId": body.data.SELL[i][5],
-                    "clientOrderId": '',
-                    "price": body.data.SELL[i][2],
-                    "origQty": body.data.SELL[i][3],
-                    "executedQty": '',
-                    "status": '',
-                    "timeInForce": '',
-                    "type": '',
-                    "side": body.data.SELL[i][1],
-                    "stopPrice": '',
-                    "icebergQty": '',
-                    "time": body.data.SELL[i][0],
-                    "isWorking": ''
-                });
+                // noinspection JSUnresolvedVariable
+                if (body.data.SELL.hasOwnProperty(i)) {
+                    // noinspection JSUnresolvedVariable
+                    toKucoin.push({
+                        "symbol": req.query.symbol,
+                        "orderId": body.data.SELL[i][5],
+                        "clientOrderId": null,
+                        "price": body.data.SELL[i][2].toString(),
+                        "origQty": body.data.SELL[i][3].toString(),
+                        "executedQty": null,
+                        "status": null,
+                        "timeInForce": null,
+                        "type": null,
+                        "side": body.data.SELL[i][1],
+                        "stopPrice": null,
+                        "icebergQty": null,
+                        "time": body.data.SELL[i][0],
+                        "isWorking": null
+                    });
+                }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.data.BUY) {
-                toKucoin.push({
-                    "symbol": req.query.symbol,
-                    "orderId": body.data.BUY[i][5],
-                    "clientOrderId": '',
-                    "price": body.data.BUY[i][2],
-                    "origQty": body.data.BUY[i][3],
-                    "executedQty": '',
-                    "status": '',
-                    "timeInForce": '',
-                    "type": '',
-                    "side": body.data.BUY[i][1],
-                    "stopPrice": '',
-                    "icebergQty": '',
-                    "time": body.data.BUY[i][0],
-                    "isWorking": ''
-                });
+                // noinspection JSUnresolvedVariable
+                if (body.data.BUY.hasOwnProperty(i)) {
+                    // noinspection JSUnresolvedVariable
+                    toKucoin.push({
+                        "symbol": req.query.symbol,
+                        "orderId": body.data.BUY[i][5],
+                        "clientOrderId": null,
+                        "price": body.data.BUY[i][2],
+                        "origQty": body.data.BUY[i][3],
+                        "executedQty": null,
+                        "status": null,
+                        "timeInForce": null,
+                        "type": null,
+                        "side": body.data.BUY[i][1],
+                        "stopPrice": null,
+                        "icebergQty": null,
+                        "time": body.data.BUY[i][0],
+                        "isWorking": null
+                    });
+                }
             }
 
-            console.log(body);
             res.send(toKucoin);
         });
 
     },
 
-    deleteOrder: function (req, res, next) {
+    deleteOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
 
+        let symbolName;
         let nonce = new Date().getTime();
 
+        const key = await getvalue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
+
         try {
-            var symbolName = symbol.carboneum[req.query.symbol].kucoin;
+            symbolName = symbol.carboneum[req.query.symbol].kucoin;
         } catch (e) {
             symbolName = req.query.symbol;
         }
 
-        let form = {
-            symbol: symbolName,
-            orderOid: req.body.orderId,
-            type: req.body.side.toUpperCase()
-        };
-
-
         const signature = genSignature({
             symbol: symbolName,
-            orderOid: req.body.orderId,
-            type: req.body.side.toUpperCase()
-        }, '/v1/cancel-order', nonce);
+            type: 'BUY',
+            orderOid: req.query.orderId,
+        }, '/v1/order/detail', nonce, key.secret_key);
 
-        var options = {
-            method: 'POST',
-            url: 'https://api.kucoin.com/v1/cancel-order',
+        let options = {
+            method: 'GET',
+            url: 'https://api.kucoin.com/v1/order/detail',
             headers:
-                {
-                    'Cache-Control': 'no-cache',
-                    'KC-API-SIGNATURE': signature,
-                    'KC-API-NONCE': nonce,
-                    'KC-API-KEY': process.env.KC_API_KEY
-                },
-            form: form,
+              {
+                  'Cache-Control': 'no-cache',
+                  'KC-API-SIGNATURE': signature,
+                  'KC-API-NONCE': nonce,
+                  'KC-API-KEY': key.api_key
+              },
+            qs: {
+                symbol: symbolName,
+                type: 'BUY',
+                orderOid: req.query.orderId,
+            },
             json: true
         };
-        request(options, function (error, response, body) {
-            if (error) throw new Error(error);
-            // console.log(res);
-            // body.symbol = symbol.binance[body.symbol];
 
-            if (body.success === false) {
-                if (body.msg.substring(0, 29) === 'Signature verification failed') {
-                    return next(new ExchangeError('Invalid Signature.', 1022));
-                } else if (body.msg.substring(0, 17) === 'Invalid operation') {
-                    return next(new ExchangeError('This operation is not supported.', 1020));
-                } else {
-                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
-                }
+        request(options, function (error, response, body) {
+
+
+            let symbolName;
+            try {
+                symbolName = symbol.carboneum[req.query.symbol].kucoin;
+            } catch (e) {
+                symbolName = req.query.symbol;
             }
-            console.log(body);
-            res.send({
-                "symbol": req.query.symbol,
-                "origClientOrderId": '',
-                "orderId": req.body.orderId,
-                "clientOrderId": ''
+            let orderType;
+
+            if (body.data === null) {
+                orderType = 'SELL';
+            } else {
+                orderType = 'BUY';
+            }
+
+            let form = {
+                type: orderType,
+                symbol: symbolName,
+                orderOid: req.query.orderId,
+            };
+
+
+            const signature = genSignature({
+                type: orderType,
+                symbol: symbolName,
+                orderOid: req.query.orderId,
+            }, '/v1/cancel-order', nonce, key.secret_key);
+
+            let options = {
+                method: 'POST',
+                url: 'https://api.kucoin.com/v1/cancel-order',
+                headers:
+                  {
+                      'Cache-Control': 'no-cache',
+                      'KC-API-SIGNATURE': signature,
+                      'KC-API-NONCE': nonce,
+                      'KC-API-KEY': key.api_key
+                  },
+                form: form,
+                json: true
+            };
+            request(options, function (error, response, body) {
+                if (error) {
+                    //todo handle this error
+                    return next(error);
+                }
+
+                if (body.success === false) {
+                    if (body.msg.substring(0, 29) === 'Signature verification failed') {
+                        return next(new ExchangeError('Invalid Signature.', 1022));
+                    } else if (body.msg.substring(0, 17) === 'Invalid operation') {
+                        return next(new ExchangeError('This operation is not supported.', 1020));
+                    } else {
+                        return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                    }
+                }
+
+                res.send({
+                    "symbol": req.query.symbol,
+                    "origClientOrderId": null,
+                    "orderId": req.query.orderId,
+                    "clientOrderId": null
+                });
             });
         });
-
     },
 
-    account: function (req, res, next) {
+    account: async function (req, res, next) {
 
         let nonce = new Date().getTime();
 
-        const signature = genSignature({}, '/v1/account/balances', nonce);
+        const key = await getvalue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
+        const signature = genSignature({}, '/v1/account/balances', nonce, key.secret_key);
 
         let accKc = {
-            "makerCommission": '',
-            "takerCommission": '',
-            "buyerCommission": '',
-            "sellerCommission": '',
-            "canTrade": '',
-            "canWithdraw": '',
-            "canDeposit": '',
+            "makerCommission": null,
+            "takerCommission": null,
+            "buyerCommission": null,
+            "sellerCommission": null,
+            "canTrade": null,
+            "canWithdraw": null,
+            "canDeposit": null,
             "updateTime": nonce,
             "balances": []
         };
 
-        var options = {
+        let options = {
             method: 'GET',
             url: 'https://api.kucoin.com/v1/account/balances',
             headers:
-                {
-                    'Cache-Control': 'no-cache',
-                    'KC-API-SIGNATURE': signature,
-                    'KC-API-NONCE': nonce,
-                    'KC-API-KEY': process.env.KC_API_KEY
-                },
+              {
+                  'Cache-Control': 'no-cache',
+                  'KC-API-SIGNATURE': signature,
+                  'KC-API-NONCE': nonce,
+                  'KC-API-KEY': key.api_key
+              },
             json: true
         };
+
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             if (body.success === false) {
                 if (body.msg.substring(0, 29) === 'Signature verification failed') {
@@ -355,22 +470,136 @@ let obj = {
                 }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.data.datas) {
+                // noinspection JSUnresolvedVariable
                 if (body.data.datas.hasOwnProperty(i)) {
+                    // noinspection JSUnresolvedVariable
                     accKc.balances.push({
                         "asset": body.data.datas[i].coinType,
-                        "free": body.data.datas[i].balance,
-                        "locked": body.data.datas[i].freezeBalance
+                        "free": `${body.data.datas[i].balance}`,
+                        "locked": `${body.data.datas[i].freezeBalance}`
                     });
                 }
             }
 
-            console.log(body);
             res.send(accKc);
         });
 
-    }
+    },
 
+    ticker: async function (symbolName, next) {
+        let options = {
+            method: 'GET',
+            url: 'https://api.kucoin.com/v1/open/tick',
+            qs: {
+                symbol: symbolName
+            },
+            json: true
+        };
+
+        try {
+            const body = await request(options);
+
+            // noinspection JSUnresolvedVariable
+            return {
+                exchange: 'kucoin',
+                price: body.data.lastDealPrice.toString()     // Open price
+            };
+        } catch (e) {
+            return next(e);
+        }
+    },
+
+    klines: async (symbolName, interval, startTime, endTime, limit, next) => {
+        if (limit !== undefined || limit != null) {
+            next(new ExchangeError('Exchange not support limit parameter', 1000));
+            return;
+        }
+
+        let qs = {
+            symbol: symbolName,
+            resolution: interval,
+            from: Math.trunc(startTime / 1000),
+            to: Math.trunc(endTime / 1000),
+        };
+
+        for (let q in qs) {
+            if (qs.hasOwnProperty(q)) {
+                if (qs[q] === undefined) {
+                    delete qs[q]
+                }
+            }
+        }
+
+        const options = {
+            method: 'GET',
+            url: 'https://api.kucoin.com/v1/open/chart/history',
+            qs,
+            headers:
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true
+        };
+
+        try {
+            const data = await request(options);
+
+            let result = [];
+
+            for (let i=0; i<data.c.length; i++) {
+                result.push([
+                    data.t[i],
+                    data.o[i].toString(),
+                    data.h[i].toString(),
+                    data.l[i].toString(),
+                    data.c[i].toString(),
+                    data.v[i].toString(),
+                    data.t[i],
+                    '',
+                    0,
+                    '',
+                    '',
+                    '',
+                ]);
+            }
+
+            return result;
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    allowInterval: (interval) => {
+        const intervalList = [
+            '1m',
+            '5m',
+            '15m',
+            '30m',
+            '1h',
+            '8h',
+            '1d',
+            '1w',
+        ];
+
+        if (intervalList.indexOf(interval) !== -1) {
+            switch (interval) {
+                case '1d':
+                    return 'D';
+                case '1w':
+                    return 'W';
+                case '1h':
+                    return '60';
+                case '8h':
+                    return '480';
+                default:
+                    return interval.replace('m', '');
+            }
+        }
+
+        return false;
+    }
 };
 
 module.exports = obj;

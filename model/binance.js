@@ -1,20 +1,35 @@
-var request = require("request");
-var CryptoJS = require("crypto-js");
+const request = require("request-promise-native");
+const CryptoJS = require("crypto-js");
+const getval = require("./getval");
 
-var symbol = require("./symbol");
-var ExchangeError = require("./exchangeerror");
+const ExchangeError = require("./exchangeError");
+
+async function getValue(req) {
+    let secret_key = await getval.get(req.session.address + ":" + req.query.exchange + ":SECRET_KEY", req.session.sign);
+    if (secret_key === null) {
+        return {err: new ExchangeError('Required Secret_key.', 7000)};
+    }
+
+    let api_key = await getval.get(req.session.address + ":" + req.query.exchange + ":API_KEY", req.session.sign);
+    if (api_key === null) {
+        return {err: new ExchangeError('Required API_KEY.', 7001)};
+    }
+
+    return {
+        api_key: api_key,
+        secret_key: secret_key
+    }
+}
 
 
-let nonce = Date.now();
-
-function genSignature(form) {
+function genSignature(form, secret_key) {
     let queryString = [];
     if (form !== undefined) {
         for (let key in form) {
-            if (key !== 'timestamp' && key !== 'signature') {
-                queryString.push(key + '=' + form[key]);
-                console.log(key);
-                console.log(form[key]);
+            if (form.hasOwnProperty(key)) {
+                if (key !== 'timestamp' && key !== 'signature') {
+                    queryString.push(key + '=' + form[key]);
+                }
             }
         }
     }
@@ -22,13 +37,11 @@ function genSignature(form) {
     queryString.push('timestamp=' + form.timestamp);
     queryString = queryString.join('&');
 
-    console.log(queryString);
-    let signatureResult = CryptoJS.HmacSHA256(queryString, process.env.BN_SECRET_KEY).toString(CryptoJS.enc.Hex);
-    form.signature = signatureResult;
+    form.signature = CryptoJS.HmacSHA256(queryString, secret_key).toString(CryptoJS.enc.Hex);
 }
 
 function deleteField(form) {
-    let optionals = ['newClientOrderId', 'stopPrice', 'icebergQty', 'newOrderRespType']
+    let optionals = ['newClientOrderId', 'stopPrice', 'icebergQty', 'newOrderRespType'];
     for (let i = 0; i < optionals.length; i++) {
         if (form[optionals[i]] === undefined) {
             delete form[optionals[i]];
@@ -37,57 +50,74 @@ function deleteField(form) {
 }
 
 let obj = {
-    depth: function (req, res, next) {
-
-        try {
-            var symbolName = symbol.carboneum[req.query.symbol].binance;
-        } catch (e) {
-            symbolName = req.query.symbol;
-        }
-
-        var options = {
+    depth: async (symbolName, next) => {
+        let options = {
             method: 'GET',
             url: 'https://api.binance.com/api/v1/depth',
             qs: {
                 symbol: symbolName
             },
             headers:
-                {
-                    'Postman-Token': 'cabcef67-a56f-4f80-b2cf-bd0a9001d03d',
-                    'Cache-Control': 'no-cache'
-                },
-            json:true
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true,
+            resolveWithFullResponse: true,
         };
 
-        request(options, function (error, response, body) {
-            if (error) throw new Error(error);
-
-            obj = body;
-            obj.lastUpdateId = nonce;
+        try {
+            const response = await request(options);
+            const body = response.body;
+            const result = response.body;
+            result.lastUpdateId = new Date().getTime();
 
             if (response.statusCode !== 200) {
-                if (body.code === -1100) {
-                    return next(new ExchangeError('Illegal characters found in a parameter.', 1100));
-                } else if (body.code === -1112) {
-                    return next(new ExchangeError('No orders on book for symbol.', 1112));
-                } else if (body.code === -2014) {
-                    return next(new ExchangeError('Invalid symbol.', 1121));
-                } else if (body.code === -2008) {
-                    return next(new ExchangeError('Invalid Api-Key ID.', 2008));
-                } else if (body.code === -2014) {
-                    return next(new ExchangeError('API-key format invalid.', 2014));
-                } else {
-                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                switch (body.code) {
+                    case -1100:
+                        next(new ExchangeError('Illegal characters found in a parameter.', 1100));
+                        return;
+                    case -1112:
+                        next(new ExchangeError('No orders on book for symbol.', 1112));
+                        return;
+                    case -1121:
+                        next(new ExchangeError('Invalid symbol.', 1121));
+                        return;
+                    case -2008:
+                        next(new ExchangeError('Invalid Api-Key ID.', 2008));
+                        return;
+                    case -2014:
+                        next(new ExchangeError('API-key format invalid.', 2014));
+                        return;
+                    default:
+                        next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                        return;
                 }
+            } else {
+                return result;
             }
-            res.send(obj);
-        });
-
+        } catch (e) {
+            next(e);
+        }
     },
 
-    newOrder: function (req, res, next) {
+    newOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        let symbolName;
+
+        const key = await getValue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
+        try {
+            symbolName = symbol.carboneum[req.body.symbol].binance;
+        } catch (e) {
+            symbolName = req.body.symbol;
+        }
         let form = {
-            symbol: symbol.carboneum[req.query.symbol].binance,
+            symbol: symbolName,
             side: req.body.side,
             type: req.body.type,
             timeInForce: req.body.timeInForce,
@@ -102,25 +132,27 @@ let obj = {
             signature: ''
         };
 
-
         deleteField(form);
-        genSignature(form);
-        console.log(form);
-        var options = {
+        genSignature(form, key.secret_key);
+
+        let options = {
             method: 'POST',
             url: 'https://api.binance.com/api/v3/order',
             headers:
-                {
-                    'Cache-Control': 'no-cache',
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': process.env.BN_API_KEY
-                },
+              {
+                  'Cache-Control': 'no-cache',
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'X-MBX-APIKEY': key.api_key
+              },
             form: form,
-            json:true
+            json: true
         };
 
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             body.symbol = symbol.binance[body.symbol];
 
@@ -144,45 +176,69 @@ let obj = {
                 } else if (body.code === -2008) {
                     return next(new ExchangeError('Invalid Api-Key ID.', 2008));
                 } else {
-                    return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+                    return next(new ExchangeError(body.msg, body.code));
                 }
             }
-            res.send(body);
+
+            res.send({
+                "symbol": body.symbol,
+                "orderId": `${body.orderId}`,
+                "clientOrderId": body.clientOrderId,
+                "transactTime": body.transactTime,
+                "price": body.price,
+                "origQty": body.origQty,
+                "executedQty": body.executedQty,
+                "status": body.status,
+                "timeInForce": body.timeInForce,
+                "type": body.type,
+                "side": body.side
+            });
         });
 
     },
 
-    allOrder: function (req, res, next) {
+    allOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        let symbolName;
+
+        const key = await getValue(req);
 
         try {
-            var symbolName = symbol.carboneum[req.query.symbol].binance;
+            symbolName = symbol.carboneum[req.query.symbol].binance;
         } catch (e) {
             symbolName = req.query.symbol;
         }
+
+        let arrBinance = [];
 
         let qs = {
             symbol: symbolName,
             timestamp: req.query.timestamp + '000'
         };
 
-        genSignature(qs);
-        var options = {
+        genSignature(qs, key.secret_key);
+        let options = {
             method: 'GET',
             url: 'https://api.binance.com/api/v3/allOrders',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': process.env.BN_API_KEY
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'X-MBX-APIKEY': key.api_key
+              },
             qs: qs,
-            json:true
+            json: true
         };
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
-            console.log(body);
             for (let i in body) {
-                body[i].symbol = symbol.binance[body[i].symbol];
+                if (body.hasOwnProperty(i)) {
+                    body[i].symbol = symbol.binance[body[i].symbol];
+                }
             }
             if (response.statusCode !== 200) {
                 if (body.code === -1100) {
@@ -195,38 +251,68 @@ let obj = {
                     return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
                 }
             }
-            console.log(body);
-            res.send(body);
+            for (let i in body) {
+                if (body.hasOwnProperty(i)) {
+                    arrBinance.push({
+                        "symbol": body[i].symbol,
+                        "orderId": body[i].orderId.toString(),
+                        "clientOrderId": body[i].clientOrderId,
+                        "price": body[i].price,
+                        "origQty": body[i].origQty,
+                        "executedQty": body[i].executedQty,
+                        "status": body[i].status,
+                        "timeInForce": body[i].timeInForce,
+                        "type": body[i].type,
+                        "side": body[i].side,
+                        "stopPrice": body[i].stopPrice,
+                        "icebergQty": body[i].icebergQty,
+                        "time": body[i].time,
+                        "isWorking": body[i].isWorking
+                    });
+                }
+            }
+
+            res.send(arrBinance);
         });
 
     },
-    deleteOrder: function (req, res, next) {
+    deleteOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        let symbolName;
+
+        const key = await getValue(req);
+
         try {
-            var symbolName = symbol.carboneum[req.query.symbol].binance;
+            symbolName = symbol.carboneum[req.query.symbol].binance;
         } catch (e) {
             symbolName = req.query.symbol;
         }
 
         let qs = {
             symbol: symbolName,
-            orderId: req.body.orderId,
+            orderId: req.query.orderId,
             timestamp: req.query.timestamp + '000'
         };
 
-        genSignature(qs);
-        var options = {
+        genSignature(qs, key.secret_key);
+        let options = {
             method: 'DELETE',
             url: 'https://api.binance.com/api/v3/order',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': process.env.BN_API_KEY
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'X-MBX-APIKEY': key.api_key
+              },
             qs: qs,
-            json:true
+            json: true
         };
+
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             body.symbol = symbol.binance[body.symbol];
 
@@ -240,31 +326,40 @@ let obj = {
                 }
             }
 
-            console.log(body);
-            res.send(body);
+            res.send({
+                "symbol": body.symbol,
+                "origClientOrderId": body.origClientOrderId,
+                "orderId": `${body.orderId}`,
+                "clientOrderId": body.clientOrderId
+            });
         });
 
     },
 
-    account: function (req, res, next) {
+    account: async function (req, res, next) {
         let qs = {
             timestamp: req.query.timestamp + '000'
         };
 
-        genSignature(qs);
-        var options = {
+        const key = await getValue(req);
+
+        genSignature(qs, key.secret_key);
+        let options = {
             method: 'GET',
             url: 'https://api.binance.com/api/v3/account',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-MBX-APIKEY': process.env.BN_API_KEY
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'X-MBX-APIKEY': key.api_key
+              },
             qs: qs,
-            json:true
+            json: true
         };
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
             if (response.statusCode !== 200) {
                 if (body.code === -1100) {
@@ -276,10 +371,96 @@ let obj = {
                 }
             }
 
-            console.log(body);
             res.send(body);
         });
 
+    },
+
+    ticker: async function (symbolName, next) {
+        let options = {
+            method: 'GET',
+            url: 'https://api.binance.com/api/v3/ticker/price',
+            qs: {
+                symbol: symbolName
+            },
+            headers:
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true
+        };
+
+        try {
+            const body = await request(options);
+
+            return {
+                exchange: 'binance',
+                price: body.price
+            };
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    klines: async (symbolName, interval, startTime, endTime, limit, next) => {
+        let qs = {
+            symbol: symbolName,
+            interval,
+            startTime,
+            endTime,
+            limit,
+        };
+
+        for (let q in qs) {
+            if (qs.hasOwnProperty(q)) {
+                if (qs[q] === undefined) {
+                    delete qs[q]
+                }
+            }
+        }
+
+        const options = {
+            method: 'GET',
+            url: 'https://api.binance.com/api/v1/klines',
+            qs,
+            headers:
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true
+        };
+
+        try {
+            return await request(options);
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    allowInterval: (interval) => {
+        const intervalList = [
+            '1m',
+            '3m',
+            '5m',
+            '15m',
+            '30m',
+            '1h',
+            '2h',
+            '4h',
+            '6h',
+            '8h',
+            '12h',
+            '1d',
+            '3d',
+            '1w',
+            '1M',
+        ];
+
+        if (intervalList.indexOf(interval) !== -1) {
+            return interval;
+        }
+
+        return false;
     }
 
 };

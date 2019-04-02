@@ -1,76 +1,98 @@
-var request = require("request");
-var CryptoJS = require("crypto-js");
+const request = require("request-promise-native");
+const CryptoJS = require("crypto-js");
+const getval = require("./getval");
 
-var symbol = require("./symbol");
-var ExchangeError = require("./exchangeerror");
+const ExchangeError = require("./exchangeError");
 
-function genSignature(form) {
+
+async function getValue(req) {
+    let secret_key = await getval.get(req.session.address + ":" + req.query.exchange + ":SECRET_KEY", req.session.sign);
+    if (secret_key === null) {
+        return {err: new ExchangeError('Required Secret_key.', 7000)};
+    }
+
+    let api_key = await getval.get(req.session.address + ":" + req.query.exchange + ":API_KEY", req.session.sign);
+    if (api_key === null) {
+        return {err: new ExchangeError('Required API_KEY.', 7001)};
+    }
+
+    return {
+        api_key: api_key,
+        secret_key: secret_key
+    }
+}
+
+function genSignature(form, secret_key) {
     let queryString = [];
 
     queryString.push(form.key + form.nonce);
     queryString = queryString.join('');
 
-    console.log(queryString);
-    let signatureResult = CryptoJS.SHA256(queryString + process.env.BX_SECRET_KEY).toString(CryptoJS.enc.Hex);
-    form.signature = signatureResult;
+    form.signature = CryptoJS.SHA256(queryString + secret_key).toString(CryptoJS.enc.Hex);
 }
 
 let obj = {
-    depth: function (req, res) {
-
-        let nonce = new Date().getTime();
-        var options = {
+    depth: async (symbolName, next) => {
+        let options = {
             method: 'GET',
             url: 'https://bx.in.th/api/orderbook/',
             qs: {
-                pairing: symbol.carboneum[req.query.symbol].bx
+                pairing: symbolName
             },
             headers:
-                {
-                    'Cache-Control': 'no-cache'
-                },
-            json:true
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true
         };
-        request(options, function (error, response, body) {
-            if (error) throw new Error(error);
 
-            body.lastUpdateId = nonce;
-
-            console.log(body);
-            res.send(body);
-        });
-
+        try {
+            const body = await request(options);
+            body.lastUpdateId = new Date().getTime();
+            return body;
+        } catch (e) {
+            next(e);
+        }
     },
 
-    newOrder: function (req, res, next) {
+    newOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        const key = await getValue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
         let form = {
-            key: process.env.BX_API_KEY,
-            nonce: req.body.timestamp + '000',
+            key: key.api_key,
+            nonce: req.body.timestamp + '00000000000',
             signature: '',
-            pairing: symbol.carboneum[req.query.symbol].bx,
-            type: req.body.side,
+            pairing: symbol.carboneum[req.body.symbol].bx,
+            type: req.body.side.toLowerCase(),
             amount: req.body.quantity,
             rate: req.body.price
         };
 
-        genSignature(form);
-        console.log(form);
-        var options = {
+        genSignature(form, key.secret_key);
+
+        let options = {
             method: 'POST',
             url: 'https://bx.in.th/api/order',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded'
+              },
             form: form,
-            json:true
+            json: true
         };
 
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
-
-            console.log(body);
             if (body.error !== null) {
                 if (body.error.substring(0, 32) === 'You must enter a valid price per') {
                     return next(new ExchangeError('Invalid Price.', 9001));
@@ -82,51 +104,62 @@ let obj = {
                     return next(new ExchangeError('Invalid side.', 1117));
                 } else if (body.error.substring(0, 13) === 'Invalid Nonce') {
                     return next(new ExchangeError('Invalid Nonce.', 9004));
-                }  else {
+                } else {
                     return next(new ExchangeError('An unknown error occured while processing the request.', 1000));
                 }
             }
 
             res.send({
-                "symbol": req.query.symbol,
-                "orderId": body.order_id,
-                "clientOrderId": '',
+                "symbol": req.body.symbol,
+                "orderId": body.order_id.toString(),
+                "clientOrderId": null,
                 "transactTime": req.body.timestamp,
                 "price": req.body.price,
                 "origQty": req.body.quantity,
-                "executeQty": '',
-                "status": '',
-                "timeInForce": '',
-                "type": '',
+                "executedQty": null,
+                "status": null,
+                "timeInForce": null,
+                "type": null,
                 "side": req.body.side.toUpperCase()
             });
         });
 
     },
-    allOrder: function (req, res, next) {
+    allOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        const key = await getValue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
         let form = {
-            key: process.env.BX_API_KEY,
-            nonce: req.query.timestamp + '000',
+            key: key.api_key,
+            nonce: req.query.timestamp + '00000000000',
             pairing: symbol.carboneum[req.query.symbol].bx
         };
 
         let toBinance = [];
 
-        genSignature(form);
-        var options = {
+        genSignature(form, key.secret_key);
+        let options = {
             method: 'POST',
             url: 'https://bx.in.th/api/getorders/',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded'
+              },
             form: form,
-            json:true
+            json: true
         };
-        request(options, function (error, response, body) {
-            if (error) throw new Error(error);
 
-            console.log(body);
+        request(options, function (error, response, body) {
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
+
             if (body.success === false) {
                 if (body.error.substring(0, 28) === 'You did not set any API key.') {
                     return next(new ExchangeError('Invalid Api-Key ID.', 2008));
@@ -137,54 +170,72 @@ let obj = {
                 }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.orders) {
-                toBinance.push({
-                    "symbol": req.query.symbol,
-                    "orderId": body.orders[i].order_id,
-                    "clientOrderId": '',
-                    "price": body.orders[i].rate,
-                    "origQty": body.orders[i].amount,
-                    "executedQty": '',
-                    "status": '',
-                    "timeInForce": '',
-                    "type": '',
-                    "side": body.orders[i].order_type.toUpperCase(),
-                    "stopPrice": '',
-                    "icebergQty": '',
-                    "time": Date.parse(body.orders[i].date)/1000,
-                    "isWorking": ''
-                });
+                // noinspection JSUnresolvedVariable
+                if (body.orders.hasOwnProperty(i)) {
+                    // noinspection JSUnresolvedVariable
+                    body.orders[i].pairing_id = symbol.bx[body.orders[i].pairing_id];
+
+                    // noinspection JSUnresolvedVariable
+                    toBinance.push({
+                        "symbol": body.orders[i].pairing_id,
+                        "orderId": body.orders[i].order_id.toString(),
+                        "clientOrderId": null,
+                        "price": body.orders[i].rate.toString(),
+                        "origQty": body.orders[i].amount.toString(),
+                        "executedQty": null,
+                        "status": null,
+                        "timeInForce": null,
+                        "type": null,
+                        "side": body.orders[i].order_type.toUpperCase(),
+                        "stopPrice": null,
+                        "icebergQty": null,
+                        "time": Date.parse(body.orders[i].date) / 1000,
+                        "isWorking": null
+                    });
+                }
             }
-            console.log(toBinance);
+
             res.send(toBinance);
         });
 
     },
-    deleteOrder: function (req, res, next) {
+    deleteOrder: async function (req, res, next) {
+        const symbol = await require('../model/symbol');
+
+        const key = await getValue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
         let form = {
-            key: process.env.BX_API_KEY,
-            nonce: req.query.timestamp + '000',
+            key: key.api_key,
+            nonce: req.query.timestamp + '00000000000',
             pairing: symbol.carboneum[req.query.symbol].bx,
-            order_id: req.body.orderId
+            order_id: req.query.orderId
         };
 
-        genSignature(form);
-        var options = {
+        genSignature(form, key.secret_key);
+        let options = {
             method: 'POST',
             url: 'https://bx.in.th/api/cancel/',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded'
+              },
             form: form,
-            json:true
+            json: true
         };
+
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
-            console.log(body);
-
-            if(body.error !== null) {
+            if (body.error !== null) {
                 if (body.error.substring(0, 32) === 'Order not found') {
                     return next(new ExchangeError('Unknown order sent.', 2011));
                 } else {
@@ -192,52 +243,61 @@ let obj = {
                 }
             }
 
-            console.log(body);
+
             res.send({
                 "symbol": req.query.symbol,
-                "origClientOrderId": '',
-                "orderId": req.body.orderId,
-                "clientOrderId": ''
+                "origClientOrderId": null,
+                "orderId": req.query.orderId,
+                "clientOrderId": null
             });
         });
 
     },
-    account: function (req, res, next) {
+    account: async function (req, res, next) {
+
+        const key = await getValue(req);
+
+        if (key.hasOwnProperty('err')) {
+            return next(key.err);
+        }
+
         let form = {
-            key: process.env.BX_API_KEY,
+            key: key.api_key,
             nonce: req.query.timestamp + '000'
         };
 
         let accBx = {
-            "makerCommission": '',
-            "takerCommission": '',
-            "buyerCommission": '',
-            "sellerCommission": '',
-            "canTrade": '',
-            "canWithdraw": '',
-            "canDeposit": '',
-            "updateTime": req.query.timestamp,
+            "makerCommission": null,
+            "takerCommission": null,
+            "buyerCommission": null,
+            "sellerCommission": null,
+            "canTrade": null,
+            "canWithdraw": null,
+            "canDeposit": null,
+            "updateTime": parseInt(req.query.timestamp),
             "balances": []
 
-    };
+        };
 
-        genSignature(form);
-        var options = {
+        genSignature(form, key.secret_key);
+
+        let options = {
             method: 'POST',
             url: 'https://bx.in.th/api/balance/',
             headers:
-                {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
+              {
+                  'Content-Type': 'application/x-www-form-urlencoded'
+              },
             form: form,
-            json:true
+            json: true
         };
         request(options, function (error, response, body) {
-            if (error) throw new Error(error);
+            if (error) {
+                //todo handle this error
+                return next(error);
+            }
 
-            console.log(body);
-
-            if(body.error === false) {
+            if (body.error === false) {
                 if (body.error.substring(0, 15) === 'Order not found') {
                     return next(new ExchangeError('Mandatory parameter was not sent, was empty/null, or malformed.', 1102));
                 } else {
@@ -245,8 +305,11 @@ let obj = {
                 }
             }
 
+            // noinspection JSUnresolvedVariable
             for (let i in body.balance) {
+                // noinspection JSUnresolvedVariable
                 if (body.balance.hasOwnProperty(i)) {
+                    // noinspection JSUnresolvedVariable
                     accBx.balances.push({
                         "asset": i,
                         "free": body.balance[i].available,
@@ -255,10 +318,143 @@ let obj = {
                 }
             }
 
-            console.log(accBx);
             res.send(accBx);
         });
 
+    },
+
+    ticker: async function (symbolName, next) {
+        let options = {
+            method: 'GET',
+            url: 'https://bx.in.th/api/trade/',
+            qs: {
+                pairing: symbolName
+            },
+            headers:
+              {
+                  'Cache-Control': 'no-cache'
+              },
+            json: true
+        };
+
+        try {
+            const body = await request(options);
+
+            // noinspection JSUnresolvedVariable
+            if (body && body.trades) {
+                let data = body.trades[body.trades.length - 1];
+
+                return {
+                    exchange: 'bx',
+                    price: data.rate
+                };
+            } else {
+                next(new ExchangeError('An unknown error occured while processing the request.', 1000));
+            }
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    klines: async (symbolName, interval, startTime, endTime, limit, next) => {
+        if (limit !== undefined || limit != null) {
+            next(new ExchangeError('Exchange not support limit parameter', 1000));
+            return;
+        }
+
+        const now = (new Date()).getTime();
+
+        switch (interval) {
+            case '5':
+                limit = '1';
+                break;
+            case '60':
+                limit = '5';
+                break;
+            case '360':
+                limit = '90';
+                break;
+        }
+
+        const callback = `jQuery172024573196238143047_${now}`;
+
+        let qs = {
+            pairing: symbolName,
+            int: interval,
+            limit,
+            callback,
+            _: now,
+        };
+
+        for (let q in qs) {
+            if (qs.hasOwnProperty(q)) {
+                if (qs[q] === undefined) {
+                    delete qs[q]
+                }
+            }
+        }
+
+        const options = {
+            method: 'GET',
+            url: 'https://bx.in.th/api/chart/price/',
+            qs,
+            headers:
+              {
+                  'Cache-Control': 'no-cache'
+              },
+        };
+
+        try {
+            const res = await request(options);
+            let result = [];
+            const data = JSON.parse(res.replace(new RegExp(`^/\\*\\*/${callback}\\(|\\)\\;`, "g"), ''));
+
+            for (let i=0; i<data.length; i++) {
+                const item = data[i];
+
+                result.push([
+                    item[0],
+                    item[5].toString(),
+                    item[2].toString(),
+                    item[1].toString(),
+                    item[6].toString(),
+                    item[4].toString(),
+                    item[0],
+                    (item[4] * item[3]).toString(),
+                    item[4] / item[3],
+                    '',
+                    '',
+                    '',
+                ]);
+            }
+
+            return result;
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    allowInterval: (interval) => {
+        const intervalList = [
+            '5m',
+            '1h',
+            '1d',
+        ];
+
+        if (intervalList.indexOf(interval) !== -1) {
+            switch (interval) {
+                case '5m':
+                    return '5'; // 1
+                case '1h':
+                    return '60'; // 5
+                case '1d':
+                    return '360'; // 90
+                default:
+                    return false;
+            }
+        }
+
+        return false;
     }
 
 };
